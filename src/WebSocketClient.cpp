@@ -34,6 +34,11 @@ void WebSocketClient::SetMessageCallback(MessageCallback cb) {
     messageCallback_ = std::move(cb);
 }
 
+void WebSocketClient::SetConnectCallback(ConnectCallback cb) {
+    std::lock_guard<std::mutex> lock(connectCallbackMutex_);
+    connectCallback_ = std::move(cb);
+}
+
 void WebSocketClient::QueueMessage(const std::string& payload) {
     std::lock_guard<std::mutex> lock(sendQueueMutex_);
     sendQueue_.push(payload);
@@ -77,6 +82,29 @@ void WebSocketClient::ThreadFunc() {
         }
 
         connected_.store(true, std::memory_order_relaxed);
+
+        // Invoke the connect callback (it may queue an unsolicited greeting)
+        {
+            ConnectCallback cb;
+            {
+                std::lock_guard<std::mutex> lock(connectCallbackMutex_);
+                cb = connectCallback_;
+            }
+            if (cb) cb();
+        }
+
+        // Flush any messages queued by the connect callback before entering
+        // the regular poll loop so they are sent immediately.
+        {
+            std::lock_guard<std::mutex> lk(sendQueueMutex_);
+            while (!sendQueue_.empty()) {
+                if (!SendFrame(fd, sendQueue_.front())) {
+                    while (!sendQueue_.empty()) sendQueue_.pop();
+                    goto reconnect;
+                }
+                sendQueue_.pop();
+            }
+        }
 
         // ── Request/response loop ─────────────────────────────────────────
         // Wait for an incoming frame from the server.  On receipt of any data
