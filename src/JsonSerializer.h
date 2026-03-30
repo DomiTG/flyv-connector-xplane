@@ -90,20 +90,38 @@ public:
 
     // ── Message envelope helpers ──────────────────────────────────────────
 
-    /** Build {"type":"AircraftData","data":{...}} */
+    /** Build {"type":"AircraftData","data":{"Aircraft":{...}}} */
     static std::string SerializeAircraftEnvelope(const SimData& d) {
-        return "{\"type\":\"AircraftData\",\"data\":" + Serialize(d) + "}";
+        return "{\"type\":\"AircraftData\",\"data\":{\"Aircraft\":" + Serialize(d) + "}}";
     }
 
     /**
-     * Build {"type":"Status","data":{"code":"600","message":"<simName>"}}
-     * when connected, or {"code":"404","message":""} when not.
+     * Build {"type":"Status","data":{"simulator_loaded":<bool>,
+     *   "simulator_connected":<bool>,"simulator_name":"<name>","last_error":"<err>"}}
      */
-    static std::string SerializeStatusEnvelope(bool connected,
+    static std::string SerializeStatusEnvelope(bool loaded,
+                                               bool connected,
+                                               const std::string& simName,
+                                               const std::string& lastError) {
+        return std::string("{\"type\":\"Status\",\"data\":{"
+                           "\"simulator_loaded\":") +
+               (loaded    ? "true" : "false") +
+               ",\"simulator_connected\":" +
+               (connected ? "true" : "false") +
+               ",\"simulator_name\":\"" + EscapeJson(simName) + "\"," +
+               "\"last_error\":\""      + EscapeJson(lastError) + "\"}}";
+    }
+
+    /**
+     * Build the unsolicited on-connect message:
+     *   {"data":{"code":"600","message":"<simName>"}}  when connected, or
+     *   {"data":{"code":"404","message":""}}            when not.
+     */
+    static std::string SerializeConnectMessage(bool connected,
                                                const std::string& simName) {
         const std::string code = connected ? "600" : "404";
         const std::string msg  = connected ? simName : "";
-        return "{\"type\":\"Status\",\"data\":{\"code\":\"" + code +
+        return "{\"data\":{\"code\":\"" + code +
                "\",\"message\":\"" + EscapeJson(msg) + "\"}}";
     }
 

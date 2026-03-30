@@ -6,12 +6,14 @@
  *
  *   Client → Plugin                  Plugin → Client
  *   ─────────────────────────────────────────────────────
- *   { "type": "AircraftData" }  →  { "type": "AircraftData", "data": {...} }
- *   { "type": "Status" }        →  { "type": "Status",       "data": { "code": "600"/"404", "message": "X-Plane N" } }
- *   { "type": "ping" }          →  { "type": "pong",         "data": {} }
+ *   { "type": "AircraftData" }  →  { "type": "AircraftData", "data": { "Aircraft": {...} } }
+ *   { "type": "Status" }        →  { "type": "Status", "data": { "simulator_loaded": <bool>,
+ *                                     "simulator_connected": <bool>, "simulator_name": "<str>",
+ *                                     "last_error": "<str>" } }
+ *   { "type": "ping" }          →  { "type": "pong", "data": {} }
  *
- * The plugin also pushes an unsolicited Status message when a flight is loaded
- * or unloaded (XPLM_MSG_PLANE_LOADED / XPLM_MSG_PLANE_UNLOADED).
+ * On WebSocket connection open the plugin immediately pushes an unsolicited
+ * greeting:  { "data": { "code": "600"/"404", "message": "<simName>"/""} }
  *
  * Build requirements
  * ──────────────────
@@ -54,6 +56,7 @@ static std::unique_ptr<WebSocketClient> g_wsClient;
 
 // ── Simulator state (written from the X-Plane main thread) ───────────────────
 static std::atomic<bool> g_simLoaded{false};  // true once a flight is loaded
+static std::string       g_lastError;         // last simulator error (empty if none)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -77,15 +80,6 @@ static std::string GetSimulatorName() {
     XPLMGetVersions(&xpVer, &xplmVer, &hostID);
     const int major = xpVer / 10000;
     return "X-Plane " + std::to_string(major);
-}
-
-/** Build and queue an unsolicited Status message. */
-static void PushStatusMessage() {
-    if (!g_wsClient) return;
-    const bool loaded = g_simLoaded.load(std::memory_order_relaxed);
-    const std::string simName = loaded ? GetSimulatorName() : "";
-    g_wsClient->QueueMessage(
-        JsonSerializer::SerializeStatusEnvelope(loaded, simName));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -113,9 +107,10 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
         }
 
         if (type == "Status") {
-            const bool loaded = g_simLoaded.load(std::memory_order_relaxed);
-            const std::string simName = loaded ? GetSimulatorName() : "";
-            return JsonSerializer::SerializeStatusEnvelope(loaded, simName);
+            const bool loaded    = g_simLoaded.load(std::memory_order_relaxed);
+            const bool connected = loaded;
+            return JsonSerializer::SerializeStatusEnvelope(
+                loaded, connected, GetSimulatorName(), g_lastError);
         }
 
         if (type == "ping") {
@@ -130,6 +125,14 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
 
         // Unknown type – return an error envelope
         return JsonSerializer::SerializeErrorEnvelope("Unknown message type: " + type);
+    });
+
+    // Push an unsolicited greeting immediately when the WebSocket opens.
+    g_wsClient->SetConnectCallback([]() {
+        const bool connected = g_simLoaded.load(std::memory_order_relaxed);
+        const std::string simName = connected ? GetSimulatorName() : "";
+        g_wsClient->QueueMessage(
+            JsonSerializer::SerializeConnectMessage(connected, simName));
     });
 
     g_wsClient->Start();
@@ -159,7 +162,7 @@ PLUGIN_API void XPluginDisable() {}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // XPluginReceiveMessage
-// Send an unsolicited Status message whenever a flight is loaded or unloaded.
+// Update simulator state when a flight is loaded or unloaded.
 // ─────────────────────────────────────────────────────────────────────────────
 PLUGIN_API void XPluginReceiveMessage(XPLMPluginID /*from*/,
                                       int          msg,
@@ -168,13 +171,11 @@ PLUGIN_API void XPluginReceiveMessage(XPLMPluginID /*from*/,
         case XPLM_MSG_PLANE_LOADED:
             // User's aircraft (and its flight) finished loading
             g_simLoaded.store(true, std::memory_order_relaxed);
-            PushStatusMessage();
             break;
 
         case XPLM_MSG_PLANE_UNLOADED:
             // Flight/aircraft is being torn down
             g_simLoaded.store(false, std::memory_order_relaxed);
-            PushStatusMessage();
             break;
 
         default:

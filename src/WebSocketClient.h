@@ -73,6 +73,13 @@ public:
      */
     using MessageCallback = std::function<std::string(const std::string&)>;
 
+    /**
+     * Callback invoked once immediately after the WebSocket handshake
+     * succeeds (i.e. the connection is fully open).  Use QueueMessage()
+     * inside this callback to push an unsolicited greeting frame.
+     */
+    using ConnectCallback = std::function<void()>;
+
     explicit WebSocketClient(const std::string& host, uint16_t port,
                              unsigned reconnectDelaySec = 3)
         : host_(host)
@@ -84,6 +91,9 @@ public:
 
     /** Register the callback that produces response data for each incoming message. */
     void SetMessageCallback(MessageCallback cb);
+
+    /** Register the callback invoked once the WebSocket connection is open. */
+    void SetConnectCallback(ConnectCallback cb);
 
     /**
      * Queue an unsolicited outbound message.  Thread-safe; may be called from
@@ -111,6 +121,9 @@ private:
 
     MessageCallback        messageCallback_;
     std::mutex             callbackMutex_;
+
+    ConnectCallback        connectCallback_;
+    std::mutex             connectCallbackMutex_;
 
     std::queue<std::string> sendQueue_;
     std::mutex              sendQueueMutex_;
