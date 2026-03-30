@@ -47,8 +47,12 @@
  *    handshake/framing logic so the X-Plane flight loop is never blocked.
  *  • The thread uses select() to wait for incoming frames with a short
  *    timeout so it can check the running_ flag regularly.
- *  • When any data frame arrives the registered DataCallback is invoked;
- *    the returned string is sent back as a masked text frame.
+ *  • When any data frame arrives the registered MessageCallback is invoked
+ *    with the raw incoming payload; if the callback returns a non-empty
+ *    string it is sent back as a masked text frame.
+ *  • Unsolicited outbound messages can be queued via QueueMessage() from
+ *    any thread; they are drained by the background thread on each poll
+ *    cycle so the socket is always written from a single thread.
  *  • Ping frames are answered with a Pong automatically.
  *  • On any error the connection is closed and the thread retries after
  *    reconnectDelaySec seconds.
@@ -56,14 +60,18 @@
  * Usage
  * ─────
  *  WebSocketClient client("localhost", 8487);
- *  client.SetDataCallback([]() { return buildJson(); });
+ *  client.SetMessageCallback([](const std::string& msg) { return reply(msg); });
  *  client.Start();   // spawns background thread
  *  client.Stop();    // graceful shutdown
  */
 class WebSocketClient {
 public:
-    /** Callback invoked on each incoming request; must return a UTF-8 JSON string. */
-    using DataCallback = std::function<std::string()>;
+    /**
+     * Callback invoked for each incoming data frame.
+     * Receives the raw UTF-8 payload; returns a UTF-8 response string to
+     * send back, or an empty string to send no response.
+     */
+    using MessageCallback = std::function<std::string(const std::string&)>;
 
     explicit WebSocketClient(const std::string& host, uint16_t port,
                              unsigned reconnectDelaySec = 3)
@@ -74,8 +82,15 @@ public:
 
     ~WebSocketClient() { Stop(); }
 
-    /** Register the callback that produces response data for each incoming request. */
-    void SetDataCallback(DataCallback cb);
+    /** Register the callback that produces response data for each incoming message. */
+    void SetMessageCallback(MessageCallback cb);
+
+    /**
+     * Queue an unsolicited outbound message.  Thread-safe; may be called from
+     * any thread (including the X-Plane flight loop).  The message is sent by
+     * the background IO thread on its next poll cycle.
+     */
+    void QueueMessage(const std::string& payload);
 
     /** Spawn background IO thread. May be called only once. */
     void Start();
@@ -94,8 +109,11 @@ private:
     std::atomic<bool>      connected_{false};
     std::thread            thread_;
 
-    DataCallback           dataCallback_;
+    MessageCallback        messageCallback_;
     std::mutex             callbackMutex_;
+
+    std::queue<std::string> sendQueue_;
+    std::mutex              sendQueueMutex_;
 
     // ── Background thread entry ────────────────────────────────────────────
     void ThreadFunc();
