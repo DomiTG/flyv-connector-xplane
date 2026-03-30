@@ -114,14 +114,14 @@ public:
 
     /**
      * Build the unsolicited on-connect message:
-     *   {"data":{"code":"600","message":"<simName>"}}  when connected, or
-     *   {"data":{"code":"404","message":""}}            when not.
+     *   {"type":"Status","data":{"code":"600","message":"<simName>"}}  when connected, or
+     *   {"type":"Status","data":{"code":"404","message":""}}            when not.
      */
     static std::string SerializeConnectMessage(bool connected,
                                                const std::string& simName) {
         const std::string code = connected ? "600" : "404";
         const std::string msg  = connected ? simName : "";
-        return "{\"data\":{\"code\":\"" + code +
+        return "{\"type\":\"Status\",\"data\":{\"code\":\"" + code +
                "\",\"message\":\"" + EscapeJson(msg) + "\"}}";
     }
 
