@@ -88,21 +88,37 @@ public:
         return o.str();
     }
 
-private:
-    static void AppendFloat(std::ostringstream& o, const char* key, float val, int prec) {
-        o << '"' << key << "\":" << std::setprecision(prec) << val;
-    }
-    static void AppendDouble(std::ostringstream& o, const char* key, double val, int prec) {
-        o << '"' << key << "\":" << std::setprecision(prec) << val;
-    }
-    static void AppendInt(std::ostringstream& o, const char* key, int val) {
-        o << '"' << key << "\":" << val;
-    }
-    static void AppendString(std::ostringstream& o, const char* key, const std::string& val) {
-        o << '"' << key << "\":\"" << EscapeJson(val) << '"';
+    // ── Message envelope helpers ──────────────────────────────────────────
+
+    /** Build {"type":"AircraftData","data":{...}} */
+    static std::string SerializeAircraftEnvelope(const SimData& d) {
+        return "{\"type\":\"AircraftData\",\"data\":" + Serialize(d) + "}";
     }
 
-    // Minimal JSON string escaping for aircraft name / ICAO strings
+    /**
+     * Build {"type":"Status","data":{"code":"600","message":"<simName>"}}
+     * when connected, or {"code":"404","message":""} when not.
+     */
+    static std::string SerializeStatusEnvelope(bool connected,
+                                               const std::string& simName) {
+        const std::string code = connected ? "600" : "404";
+        const std::string msg  = connected ? simName : "";
+        return "{\"type\":\"Status\",\"data\":{\"code\":\"" + code +
+               "\",\"message\":\"" + EscapeJson(msg) + "\"}}";
+    }
+
+    /** Build {"type":"pong","data":{}} */
+    static std::string SerializePongEnvelope() {
+        return "{\"type\":\"pong\",\"data\":{}}";
+    }
+
+    /** Build {"type":"Error","data":{"message":"<msg>"}} */
+    static std::string SerializeErrorEnvelope(const std::string& msg) {
+        return "{\"type\":\"Error\",\"data\":{\"message\":\"" +
+               EscapeJson(msg) + "\"}}";
+    }
+
+    /** Minimal JSON string escaping (also used by envelope helpers). */
     static std::string EscapeJson(const std::string& s) {
         std::string out;
         out.reserve(s.size());
@@ -115,7 +131,6 @@ private:
                 case '\t': out += "\\t";  break;
                 default:
                     if (c < 0x20) {
-                        // Control characters → \uXXXX
                         std::ostringstream esc;
                         esc << "\\u"
                             << std::hex << std::setw(4) << std::setfill('0')
@@ -127,5 +142,19 @@ private:
             }
         }
         return out;
+    }
+
+private:
+    static void AppendFloat(std::ostringstream& o, const char* key, float val, int prec) {
+        o << '"' << key << "\":" << std::setprecision(prec) << val;
+    }
+    static void AppendDouble(std::ostringstream& o, const char* key, double val, int prec) {
+        o << '"' << key << "\":" << std::setprecision(prec) << val;
+    }
+    static void AppendInt(std::ostringstream& o, const char* key, int val) {
+        o << '"' << key << "\":" << val;
+    }
+    static void AppendString(std::ostringstream& o, const char* key, const std::string& val) {
+        o << '"' << key << "\":\"" << EscapeJson(val) << '"';
     }
 };

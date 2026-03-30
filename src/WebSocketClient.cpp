@@ -29,9 +29,14 @@ int WebSocketClient::LastError() { return errno; }
 // Public API
 // ─────────────────────────────────────────────────────────────────────────────
 
-void WebSocketClient::SetDataCallback(DataCallback cb) {
+void WebSocketClient::SetMessageCallback(MessageCallback cb) {
     std::lock_guard<std::mutex> lock(callbackMutex_);
-    dataCallback_ = std::move(cb);
+    messageCallback_ = std::move(cb);
+}
+
+void WebSocketClient::QueueMessage(const std::string& payload) {
+    std::lock_guard<std::mutex> lock(sendQueueMutex_);
+    sendQueue_.push(payload);
 }
 
 void WebSocketClient::Start() {
@@ -104,18 +109,33 @@ void WebSocketClient::ThreadFunc() {
                 }
 
                 if (result > 0) {
-                    // Data request received — collect and respond
-                    DataCallback cb;
+                    // Data frame received — invoke callback with incoming payload
+                    MessageCallback cb;
                     {
                         std::lock_guard<std::mutex> lock(callbackMutex_);
-                        cb = dataCallback_;
+                        cb = messageCallback_;
                     }
                     if (cb) {
-                        std::string response = cb();
-                        if (!SendFrame(fd, response)) {
-                            goto reconnect;
+                        std::string response = cb(incoming);
+                        if (!response.empty()) {
+                            if (!SendFrame(fd, response)) {
+                                goto reconnect;
+                            }
                         }
                     }
+                }
+            }
+
+            // Drain any unsolicited outbound messages queued from other threads
+            {
+                std::lock_guard<std::mutex> lk(sendQueueMutex_);
+                while (!sendQueue_.empty()) {
+                    if (!SendFrame(fd, sendQueue_.front())) {
+                        // Clear the queue and reconnect on send error
+                        while (!sendQueue_.empty()) sendQueue_.pop();
+                        goto reconnect;
+                    }
+                    sendQueue_.pop();
                 }
             }
         }

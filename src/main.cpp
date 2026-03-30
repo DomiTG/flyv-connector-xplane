@@ -1,9 +1,17 @@
 /**
  * FlyV X-Plane Connector
  *
- * X-Plane plugin that streams simulator data to a local WebSocket server at
- * ws://localhost:8487 on demand: data is only collected and sent when the
- * server sends a request frame.
+ * X-Plane plugin that connects to a local WebSocket server at
+ * ws://localhost:8487 and handles typed JSON message requests:
+ *
+ *   Client → Plugin                  Plugin → Client
+ *   ─────────────────────────────────────────────────────
+ *   { "type": "AircraftData" }  →  { "type": "AircraftData", "data": {...} }
+ *   { "type": "Status" }        →  { "type": "Status",       "data": { "code": "600"/"404", "message": "X-Plane N" } }
+ *   { "type": "ping" }          →  { "type": "pong",         "data": {} }
+ *
+ * The plugin also pushes an unsolicited Status message when a flight is loaded
+ * or unloaded (XPLM_MSG_PLANE_LOADED / XPLM_MSG_PLANE_UNLOADED).
  *
  * Build requirements
  * ──────────────────
@@ -18,8 +26,10 @@
  *  XPluginReceiveMessage
  */
 
+#include <atomic>
 #include <cstring>
 #include <memory>
+#include <string>
 
 // X-Plane SDK headers (resolved via XPLANE_SDK_PATH at build time)
 #include "XPLMPlugin.h"
@@ -42,6 +52,42 @@ static constexpr uint16_t kWsPort   = 8487;
 static std::unique_ptr<DataCollector>   g_collector;
 static std::unique_ptr<WebSocketClient> g_wsClient;
 
+// ── Simulator state (written from the X-Plane main thread) ───────────────────
+static std::atomic<bool> g_simLoaded{false};  // true once a flight is loaded
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Extract the string value of a JSON key from a flat single-level object. */
+static std::string JsonGetString(const std::string& json, const std::string& key) {
+    const std::string search = "\"" + key + "\":\"";
+    const auto pos = json.find(search);
+    if (pos == std::string::npos) return {};
+    const auto start = pos + search.size();
+    const auto end   = json.find('"', start);
+    if (end == std::string::npos) return {};
+    return json.substr(start, end - start);
+}
+
+/** Return the X-Plane simulator name derived from the running version. */
+static std::string GetSimulatorName() {
+    int xpVer = 0, xplmVer = 0;
+    XPLMHostApplicationID hostID;
+    XPLMGetVersions(&xpVer, &xplmVer, &hostID);
+    const int major = xpVer / 10000;
+    return "X-Plane " + std::to_string(major);
+}
+
+/** Build and queue an unsolicited Status message. */
+static void PushStatusMessage() {
+    if (!g_wsClient) return;
+    const bool loaded = g_simLoaded.load(std::memory_order_relaxed);
+    const std::string simName = loaded ? GetSimulatorName() : "";
+    g_wsClient->QueueMessage(
+        JsonSerializer::SerializeStatusEnvelope(loaded, simName));
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // XPluginStart
 // ─────────────────────────────────────────────────────────────────────────────
@@ -55,13 +101,35 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
     g_collector = std::make_unique<DataCollector>();
     g_wsClient  = std::make_unique<WebSocketClient>(kWsHost, kWsPort);
 
-    // Respond to every incoming request with a fresh snapshot of sim data.
-    // X-Plane DataRef reads are thread-safe so calling Collect() from the
-    // WebSocket background thread is safe.
-    g_wsClient->SetDataCallback([]() -> std::string {
-        if (!g_collector) return "{}";
-        SimData data = g_collector->Collect();
-        return JsonSerializer::Serialize(data);
+    // Handle typed incoming requests and return typed responses.
+    g_wsClient->SetMessageCallback([](const std::string& incoming) -> std::string {
+        const std::string type = JsonGetString(incoming, "type");
+
+        if (type == "AircraftData") {
+            // Collect current simulator state and wrap in the typed envelope
+            if (!g_collector) return JsonSerializer::SerializeErrorEnvelope("Collector unavailable");
+            const SimData data = g_collector->Collect();
+            return JsonSerializer::SerializeAircraftEnvelope(data);
+        }
+
+        if (type == "Status") {
+            const bool loaded = g_simLoaded.load(std::memory_order_relaxed);
+            const std::string simName = loaded ? GetSimulatorName() : "";
+            return JsonSerializer::SerializeStatusEnvelope(loaded, simName);
+        }
+
+        if (type == "ping") {
+            return JsonSerializer::SerializePongEnvelope();
+        }
+
+        if (type == "Error" || type == "error") {
+            // Log server-side errors; no reply needed
+            XPLMDebugString(("[FlyV] Error from server: " + incoming + "\n").c_str());
+            return {};
+        }
+
+        // Unknown type – return an error envelope
+        return JsonSerializer::SerializeErrorEnvelope("Unknown message type: " + type);
     });
 
     g_wsClient->Start();
@@ -90,9 +158,27 @@ PLUGIN_API int  XPluginEnable()  { return 1; }
 PLUGIN_API void XPluginDisable() {}
 
 // ─────────────────────────────────────────────────────────────────────────────
-// XPluginReceiveMessage – not used, but required by the SDK
+// XPluginReceiveMessage
+// Send an unsolicited Status message whenever a flight is loaded or unloaded.
 // ─────────────────────────────────────────────────────────────────────────────
 PLUGIN_API void XPluginReceiveMessage(XPLMPluginID /*from*/,
-                                      int          /*msg*/,
-                                      void*        /*param*/) {}
+                                      int          msg,
+                                      void*        /*param*/) {
+    switch (msg) {
+        case XPLM_MSG_PLANE_LOADED:
+            // User's aircraft (and its flight) finished loading
+            g_simLoaded.store(true, std::memory_order_relaxed);
+            PushStatusMessage();
+            break;
+
+        case XPLM_MSG_PLANE_UNLOADED:
+            // Flight/aircraft is being torn down
+            g_simLoaded.store(false, std::memory_order_relaxed);
+            PushStatusMessage();
+            break;
+
+        default:
+            break;
+    }
+}
 
