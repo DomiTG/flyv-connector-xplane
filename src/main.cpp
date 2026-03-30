@@ -2,7 +2,8 @@
  * FlyV X-Plane Connector
  *
  * X-Plane plugin that streams simulator data to a local WebSocket server at
- * ws://localhost:8487 every 100 milliseconds.
+ * ws://localhost:8487 on demand: data is only collected and sent when the
+ * server sends a request frame.
  *
  * Build requirements
  * ──────────────────
@@ -22,7 +23,6 @@
 
 // X-Plane SDK headers (resolved via XPLANE_SDK_PATH at build time)
 #include "XPLMPlugin.h"
-#include "XPLMProcessing.h"
 #include "XPLMUtilities.h"
 
 #include "DataCollector.h"
@@ -35,29 +35,12 @@ static constexpr char kPluginSig[]  = "com.flyv.connector.xplane";
 static constexpr char kPluginDesc[] =
     "Streams X-Plane simulator data to FlyV via WebSocket (ws://localhost:8487)";
 
-static constexpr char   kWsHost[]         = "127.0.0.1";
-static constexpr uint16_t kWsPort         = 8487;
-static constexpr float  kFlightLoopInterval = 0.1f;   // 100 ms
+static constexpr char     kWsHost[] = "127.0.0.1";
+static constexpr uint16_t kWsPort   = 8487;
 
 // ── Module-level singletons ───────────────────────────────────────────────────
-static std::unique_ptr<DataCollector>  g_collector;
+static std::unique_ptr<DataCollector>   g_collector;
 static std::unique_ptr<WebSocketClient> g_wsClient;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Flight-loop callback – called by X-Plane at ~100 ms intervals
-// ─────────────────────────────────────────────────────────────────────────────
-static float FlightLoopCallback(float /*elapsedSinceLastCall*/,
-                                float /*elapsedSinceLastFlightLoop*/,
-                                int   /*counter*/,
-                                void* /*refCon*/)
-{
-    if (g_collector && g_wsClient) {
-        SimData data = g_collector->Collect();
-        std::string json = JsonSerializer::Serialize(data);
-        g_wsClient->Send(std::move(json));
-    }
-    return kFlightLoopInterval;
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // XPluginStart
@@ -71,11 +54,19 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
 
     g_collector = std::make_unique<DataCollector>();
     g_wsClient  = std::make_unique<WebSocketClient>(kWsHost, kWsPort);
+
+    // Respond to every incoming request with a fresh snapshot of sim data.
+    // X-Plane DataRef reads are thread-safe so calling Collect() from the
+    // WebSocket background thread is safe.
+    g_wsClient->SetDataCallback([]() -> std::string {
+        if (!g_collector) return "{}";
+        SimData data = g_collector->Collect();
+        return JsonSerializer::Serialize(data);
+    });
+
     g_wsClient->Start();
 
-    XPLMRegisterFlightLoopCallback(FlightLoopCallback, kFlightLoopInterval, nullptr);
-
-    XPLMDebugString("[FlyV] Plugin started – streaming to ws://127.0.0.1:8487\n");
+    XPLMDebugString("[FlyV] Plugin started – listening for requests on ws://127.0.0.1:8487\n");
     return 1;
 }
 
@@ -84,8 +75,6 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
 // ─────────────────────────────────────────────────────────────────────────────
 PLUGIN_API void XPluginStop() {
     XPLMDebugString("[FlyV] XPluginStop\n");
-
-    XPLMUnregisterFlightLoopCallback(FlightLoopCallback, nullptr);
 
     if (g_wsClient) {
         g_wsClient->Stop();
@@ -106,3 +95,4 @@ PLUGIN_API void XPluginDisable() {}
 PLUGIN_API void XPluginReceiveMessage(XPLMPluginID /*from*/,
                                       int          /*msg*/,
                                       void*        /*param*/) {}
+

@@ -5,6 +5,7 @@
 #include <thread>
 #include <atomic>
 #include <cstdint>
+#include <functional>
 
 // ── Platform socket type ──────────────────────────────────────────────────────
 #if defined(IBM) || defined(_WIN32)
@@ -36,25 +37,34 @@
 /**
  * WebSocketClient
  *
- * A minimal, cross-platform (Windows / macOS) WebSocket TEXT-frame sender.
+ * A minimal, cross-platform (Windows / macOS) WebSocket client that operates
+ * in request-response mode: it waits for an incoming message from the server
+ * and responds immediately with simulator data via a registered callback.
  *
  * Architecture
  * ────────────
  *  • A dedicated background thread owns the TCP socket and the RFC-6455
  *    handshake/framing logic so the X-Plane flight loop is never blocked.
- *  • Send() enqueues a string; the background thread drains the queue.
- *  • On any send/receive error the connection is closed and the thread
- *    automatically retries after kReconnectDelay seconds.
+ *  • The thread uses select() to wait for incoming frames with a short
+ *    timeout so it can check the running_ flag regularly.
+ *  • When any data frame arrives the registered DataCallback is invoked;
+ *    the returned string is sent back as a masked text frame.
+ *  • Ping frames are answered with a Pong automatically.
+ *  • On any error the connection is closed and the thread retries after
+ *    reconnectDelaySec seconds.
  *
  * Usage
  * ─────
  *  WebSocketClient client("localhost", 8487);
- *  client.Start();                // spawns background thread
- *  client.Send("{\"hello\":1}");  // non-blocking
- *  client.Stop();                 // graceful shutdown
+ *  client.SetDataCallback([]() { return buildJson(); });
+ *  client.Start();   // spawns background thread
+ *  client.Stop();    // graceful shutdown
  */
 class WebSocketClient {
 public:
+    /** Callback invoked on each incoming request; must return a UTF-8 JSON string. */
+    using DataCallback = std::function<std::string()>;
+
     explicit WebSocketClient(const std::string& host, uint16_t port,
                              unsigned reconnectDelaySec = 3)
         : host_(host)
@@ -64,26 +74,18 @@ public:
 
     ~WebSocketClient() { Stop(); }
 
+    /** Register the callback that produces response data for each incoming request. */
+    void SetDataCallback(DataCallback cb);
+
     /** Spawn background IO thread. May be called only once. */
     void Start();
 
     /** Signal shutdown and join the background thread (blocks briefly). */
     void Stop();
 
-    /**
-     * Enqueue a UTF-8 text payload.  Returns immediately; the background
-     * thread will send it as soon as the connection is established.
-     * The queue is bounded to kMaxQueueDepth items; oldest items are dropped
-     * when the connection is down for a long time to avoid unbounded growth.
-     */
-    void Send(std::string payload);
-
     bool IsConnected() const { return connected_.load(std::memory_order_relaxed); }
 
 private:
-    // ── Configuration ─────────────────────────────────────────────────────
-    static constexpr size_t kMaxQueueDepth = 512;
-
     // ── State ─────────────────────────────────────────────────────────────
     std::string            host_;
     uint16_t               port_;
@@ -92,8 +94,8 @@ private:
     std::atomic<bool>      connected_{false};
     std::thread            thread_;
 
-    std::mutex             queueMutex_;
-    std::queue<std::string> sendQueue_;
+    DataCallback           dataCallback_;
+    std::mutex             callbackMutex_;
 
     // ── Background thread entry ────────────────────────────────────────────
     void ThreadFunc();
@@ -106,8 +108,23 @@ private:
     static bool PerformHandshake(SocketFd fd,
                                  const std::string& host, uint16_t port);
 
-    // ── WebSocket framing (RFC 6455 – client-to-server, masked text) ───────
+    // ── WebSocket framing (RFC 6455) ───────────────────────────────────────
+    /** Send a masked client-to-server text frame. */
     static bool SendFrame(SocketFd fd, const std::string& payload);
+
+    /** Send a masked client-to-server control frame (e.g. pong, opcode 0xA). */
+    static bool SendControlFrame(SocketFd fd, uint8_t opcode,
+                                 const std::string& payload);
+
+    /**
+     * Receive one WebSocket frame from the server (unmasked, server-to-client).
+     * Returns: 1 = data frame (payload filled), 0 = control frame handled
+     *          (ping answered, pong/close ignored), -1 = error / connection closed.
+     */
+    static int  RecvFrame(SocketFd fd, std::string& payload);
+
+    /** Blocking helper: receive exactly len bytes. */
+    static bool RecvAll(SocketFd fd, void* buf, size_t len);
 
     // ── Platform helpers ──────────────────────────────────────────────────
     static void SleepMs(unsigned ms);
