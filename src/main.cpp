@@ -78,7 +78,7 @@ static std::string GetSimulatorName() {
     int xpVer = 0, xplmVer = 0;
     XPLMHostApplicationID hostID;
     XPLMGetVersions(&xpVer, &xplmVer, &hostID);
-    const int major = xpVer / 10000;
+    const int major = xpVer / 1000;
     return "X-Plane " + std::to_string(major);
 }
 
