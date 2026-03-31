@@ -31,10 +31,12 @@
 #include <atomic>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
 
 // X-Plane SDK headers (resolved via XPLANE_SDK_PATH at build time)
 #include "XPLMPlugin.h"
+#include "XPLMProcessing.h"
 #include "XPLMUtilities.h"
 
 #include "DataCollector.h"
@@ -57,6 +59,11 @@ static std::unique_ptr<WebSocketClient> g_wsClient;
 // ── Simulator state (written from the X-Plane main thread) ───────────────────
 static std::atomic<bool> g_simLoaded{false};  // true once a flight is loaded
 static std::string       g_lastError;         // last simulator error (empty if none)
+static std::string       g_simulatorName;     // cached once on start; read-only after thread launch
+
+// ── SimData snapshot (written on main thread, read from background thread) ───
+static std::mutex        g_simDataMutex;
+static SimData           g_simDataSnapshot{};  // protected by g_simDataMutex
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -83,6 +90,23 @@ static std::string GetSimulatorName() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Flight loop callback – runs on the X-Plane main thread every frame.
+// Collects a fresh SimData snapshot so that background-thread message handlers
+// can read it without touching XPLM DataRef functions off-thread.
+// ─────────────────────────────────────────────────────────────────────────────
+static float FlightLoopCallback(float /*elapsedSinceLastCall*/,
+                                float /*elapsedSinceLastFlightLoop*/,
+                                int   /*counter*/,
+                                void* /*refcon*/) {
+    if (g_collector) {
+        SimData snapshot = g_collector->Collect();
+        std::lock_guard<std::mutex> lock(g_simDataMutex);
+        g_simDataSnapshot = std::move(snapshot);
+    }
+    return -1.0f;  // -1 = call every frame
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // XPluginStart
 // ─────────────────────────────────────────────────────────────────────────────
 PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
@@ -95,14 +119,26 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
     g_collector = std::make_unique<DataCollector>();
     g_wsClient  = std::make_unique<WebSocketClient>(kWsHost, kWsPort);
 
+    // Cache the simulator name on the main thread so background threads can
+    // read it without calling XPLM functions off-thread.
+    g_simulatorName = GetSimulatorName();
+
+    // Register a flight loop to collect SimData on the main thread every frame.
+    // The background WebSocket thread reads from the resulting snapshot.
+    XPLMRegisterFlightLoopCallback(FlightLoopCallback, -1.0f, nullptr);
+
     // Handle typed incoming requests and return typed responses.
     g_wsClient->SetMessageCallback([](const std::string& incoming) -> std::string {
         const std::string type = JsonGetString(incoming, "type");
 
         if (type == "AircraftData") {
-            // Collect current simulator state and wrap in the typed envelope
+            // Serve the most-recent SimData snapshot collected on the main thread.
             if (!g_collector) return JsonSerializer::SerializeErrorEnvelope("Collector unavailable");
-            const SimData data = g_collector->Collect();
+            SimData data;
+            {
+                std::lock_guard<std::mutex> lock(g_simDataMutex);
+                data = g_simDataSnapshot;
+            }
             return JsonSerializer::SerializeAircraftEnvelope(data);
         }
 
@@ -110,7 +146,7 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
             const bool loaded    = g_simLoaded.load(std::memory_order_relaxed);
             const bool connected = loaded;
             return JsonSerializer::SerializeStatusEnvelope(
-                loaded, connected, GetSimulatorName(), g_lastError);
+                loaded, connected, g_simulatorName, g_lastError);
         }
 
         if (type == "ping") {
@@ -130,7 +166,7 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
     // Push an unsolicited greeting immediately when the WebSocket opens.
     g_wsClient->SetConnectCallback([]() {
         const bool connected = g_simLoaded.load(std::memory_order_relaxed);
-        const std::string simName = connected ? GetSimulatorName() : "";
+        const std::string simName = connected ? g_simulatorName : "";
         g_wsClient->QueueMessage(
             JsonSerializer::SerializeConnectMessage(connected, simName));
     });
@@ -146,6 +182,8 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
 // ─────────────────────────────────────────────────────────────────────────────
 PLUGIN_API void XPluginStop() {
     XPLMDebugString("[FlyV] XPluginStop\n");
+
+    XPLMUnregisterFlightLoopCallback(FlightLoopCallback, nullptr);
 
     if (g_wsClient) {
         g_wsClient->Stop();
