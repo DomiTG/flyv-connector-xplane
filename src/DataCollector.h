@@ -29,6 +29,7 @@ public:
         drAirspeedTrue     = XPLMFindDataRef("sim/flightmodel/position/true_airspeed2");
         drVerticalSpeed    = XPLMFindDataRef("sim/flightmodel/position/vh_ind_fpm");
         drHeadingTrue      = XPLMFindDataRef("sim/flightmodel/position/psi");
+        drHeadingMag       = XPLMFindDataRef("sim/flightmodel2/position/mag_psi");
         drPitch            = XPLMFindDataRef("sim/flightmodel/position/theta");
         drBank             = XPLMFindDataRef("sim/flightmodel/position/phi");
         drGroundSpeed      = XPLMFindDataRef("sim/flightmodel/position/groundspeed");
@@ -71,10 +72,10 @@ public:
         SimData d{};
 
         // ── Position / flight dynamics ────────────────────────────────────
-        d.PLANE_ALTITUDE              = SafeGetDouble(drAltitude);
+        d.PLANE_ALTITUDE              = SafeGetDouble(drAltitude) * metersToFeet;  // convert from metres to feet
         d.PLANE_LATITUDE              = SafeGetDouble(drLatitude);
         d.PLANE_LONGITUDE             = SafeGetDouble(drLongitude);
-        d.PLANE_ALT_ABOVE_GROUND      = SafeGetFloat(drAltAGL);
+        d.PLANE_ALT_ABOVE_GROUND      = SafeGetFloat(drAltAGL) * metersToFeet;  // convert from metres to feet
         d.AIRSPEED_INDICATED          = SafeGetFloat(drAirspeedInd);
 
         // true_airspeed2 is in m/s — convert to knots
@@ -82,6 +83,7 @@ public:
 
         d.VERTICAL_SPEED              = std::roundf(SafeGetFloat(drVerticalSpeed));
         d.PLANE_HEADING_DEGREES_TRUE  = SafeGetFloat(drHeadingTrue);
+        d.PLANE_HEADING_MAGNETIC      = SafeGetFloat(drHeadingMag);
         d.PLANE_PITCH_DEGREES         = SafeGetFloat(drPitch);
         d.PLANE_BANK_DEGREES          = SafeGetFloat(drBank);
 
@@ -163,6 +165,7 @@ private:
     XPLMDataRef drAirspeedTrue  = nullptr;
     XPLMDataRef drVerticalSpeed = nullptr;
     XPLMDataRef drHeadingTrue   = nullptr;
+    XPLMDataRef drHeadingMag    = nullptr;
     XPLMDataRef drPitch         = nullptr;
     XPLMDataRef drBank          = nullptr;
     XPLMDataRef drGroundSpeed   = nullptr;
@@ -200,6 +203,7 @@ private:
     // but is aircraft-specific; adjusting it does not affect the 0–1 ratio
     // already exposed through TRAILING_EDGE_FLAPS_LEFT/RIGHT_ANGLE.
     static constexpr float kMsToKnots    = 1.94384f;  // 1 m/s = 1.94384 knots
+    static constexpr float metersToFeet    = 3.28084f;  // 1 metre = 3.28084 feet
     static constexpr float kFlapToDegrees= 40.0f;     // nominal full-flap angle (degrees)
 
     // ── Safe accessor helpers ─────────────────────────────────────────────

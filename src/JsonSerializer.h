@@ -32,6 +32,7 @@ public:
         AppendFloat (o, "AIRSPEED_TRUE",               d.AIRSPEED_TRUE,               2); o << ',';
         AppendFloat (o, "VERTICAL_SPEED",              d.VERTICAL_SPEED,              0); o << ',';
         AppendFloat (o, "PLANE_HEADING_DEGREES_TRUE",  d.PLANE_HEADING_DEGREES_TRUE,  2); o << ',';
+        AppendFloat (o, "PLANE_HEADING_MAGNETIC",      d.PLANE_HEADING_MAGNETIC,  2); o << ',';
         AppendFloat (o, "PLANE_PITCH_DEGREES",         d.PLANE_PITCH_DEGREES,         2); o << ',';
         AppendFloat (o, "PLANE_BANK_DEGREES",          d.PLANE_BANK_DEGREES,          2); o << ',';
         AppendFloat (o, "GROUND_VELOCITY",             d.GROUND_VELOCITY,             0); o << ',';

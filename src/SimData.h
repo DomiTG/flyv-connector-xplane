@@ -18,6 +18,7 @@ struct SimData {
     float   AIRSPEED_TRUE;               // knots
     float   VERTICAL_SPEED;             // fpm – rounded
     float   PLANE_HEADING_DEGREES_TRUE;  // degrees
+    float   PLANE_HEADING_MAGNETIC;
     float   PLANE_PITCH_DEGREES;         // degrees (nose-up positive)
     float   PLANE_BANK_DEGREES;          // degrees (right-bank positive)
     float   GROUND_VELOCITY;             // knots – rounded
